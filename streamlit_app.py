@@ -1718,6 +1718,14 @@ with tab_plan_compras:
                 ),
             ).strip("_")
 
+            nombre_archivo = re.sub(
+                r"[^a-zA-Z0-9]+",
+                "_",
+                normalizar_texto(
+                    supranumero_seleccionado
+                ),
+            ).strip("_")
+
             st.download_button(
                 label=(
                     "Descargar plan de compras de "
@@ -1738,7 +1746,7 @@ with tab_plan_compras:
                     "descarga_plan_compras_"
                     + nombre_archivo
                 ),
-        
+            )
 # =========================================================
 # SEGUIMIENTO
 # =========================================================
