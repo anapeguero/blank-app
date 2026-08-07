@@ -935,21 +935,24 @@ if filtro_anio:
 (
     tab_resumen,
     tab_plan,
+    tab_plan_compras,
     tab_seguimiento,
     tab_flujo,
     tab_entregas,
+    tab_cronograma,
     tab_calidad,
 ) = st.tabs(
     [
         "📊 Resumen ejecutivo",
         "📅 Plan mensual",
+        "🛒 Plan de compras",
         "🚦 Seguimiento",
         "💵 Flujo de caja",
         "🚚 Entregas y almacén",
+        "🗓️ Cronograma de activos",
         "✅ Calidad de datos",
     ]
 )
-
 
 # =========================================================
 # RESUMEN EJECUTIVO
@@ -1141,15 +1144,12 @@ with tab_resumen:
             width="stretch",
         )
 
-
 # =========================================================
 # PLAN MENSUAL
 # =========================================================
 
 with tab_plan:
-    st.subheader(
-        "Plan mensual por supranúmero"
-    )
+    st.subheader("Plan mensual por supranúmero")
 
     if df_planificado.empty:
         st.info(
@@ -1172,27 +1172,46 @@ with tab_plan:
                 matriz[mes] = 0
 
         matriz = matriz[ORDEN_MESES]
-        matriz["Total"] = matriz.sum(axis=1)
+
+        matriz["Total"] = matriz.sum(
+            axis=1
+        )
 
         matriz = matriz.sort_values(
             "Total",
             ascending=False,
         )
 
-        st.dataframe(
-            matriz.style.background_gradient(
+        def formato_monto_plan(valor):
+            if pd.isna(valor):
+                return ""
+
+            if abs(float(valor)) < 0.005:
+                return ""
+
+            return f"US$ {float(valor):,.2f}"
+
+        estilo_matriz = (
+            matriz.style
+            .background_gradient(
                 cmap="Blues",
                 subset=ORDEN_MESES,
-            ),
+            )
+            .format(
+                formato_monto_plan,
+                subset=matriz.columns,
+            )
+        )
+
+        st.dataframe(
+            estilo_matriz,
             width="stretch",
             height=620,
-            column_config={
-                columna: st.column_config.NumberColumn(
-                    columna,
-                    format="US$ %.2f",
-                )
-                for columna in matriz.columns
-            },
+        )
+
+        st.caption(
+            "Las celdas vacías representan meses "
+            "sin monto planificado."
         )
 
         detalle_plan = df_planificado[
@@ -1239,9 +1258,487 @@ with tab_plan:
                 "application/vnd.openxmlformats-officedocument."
                 "spreadsheetml.sheet"
             ),
+            key="descarga_plan_mensual",
         )
 
 
+# =========================================================
+# PLAN OPERATIVO DE COMPRAS
+# =========================================================
+
+with tab_plan_compras:
+    st.subheader(
+        "Plan operativo de compras por supranúmero"
+    )
+
+    st.caption(
+        "Selecciona una categoría de activo para identificar "
+        "cuánto comprar, en qué mes y para cuáles tiendas."
+    )
+
+    if df_planificado.empty:
+        st.info(
+            "No existen compras con fechas válidas "
+            "para los filtros seleccionados."
+        )
+
+    else:
+        opciones_supranumero = sorted(
+            df_planificado[
+                "Supranúmero"
+            ]
+            .dropna()
+            .unique()
+            .tolist()
+        )
+
+        if not opciones_supranumero:
+            st.info(
+                "No existen supranúmeros disponibles "
+                "para los filtros seleccionados."
+            )
+
+        else:
+            columna_selector, columna_orden = st.columns(
+                [2, 1]
+            )
+
+            supranumero_seleccionado = (
+                columna_selector.selectbox(
+                    "Selecciona el supranúmero que deseas gestionar",
+                    options=opciones_supranumero,
+                    key="supranumero_plan_compras",
+                )
+            )
+
+            tipo_orden_plan = columna_orden.selectbox(
+                "Ordenar detalle por",
+                options=[
+                    "Fecha de compra",
+                    "Tienda",
+                    "Mayor cantidad",
+                    "Mayor monto",
+                ],
+                key="orden_plan_compras",
+            )
+
+            plan_supranumero = df_planificado[
+                df_planificado[
+                    "Supranúmero"
+                ].eq(
+                    supranumero_seleccionado
+                )
+            ].copy()
+
+            cantidad_total = plan_supranumero[
+                "Cantidad"
+            ].sum()
+
+            monto_total = plan_supranumero[
+                "Presupuesto USD"
+            ].sum()
+
+            cantidad_tiendas = plan_supranumero[
+                "Tienda"
+            ].nunique()
+
+            cantidad_meses = plan_supranumero[
+                "Mes compra"
+            ].nunique()
+
+            primera_fecha = plan_supranumero[
+                "Fecha compra"
+            ].min()
+
+            indicadores_plan = st.columns(5)
+
+            indicadores_plan[0].metric(
+                "Cantidad total",
+                (
+                    f"{cantidad_total:,.0f}"
+                    if float(cantidad_total).is_integer()
+                    else f"{cantidad_total:,.2f}"
+                ),
+            )
+
+            indicadores_plan[1].metric(
+                "Monto planificado",
+                f"US$ {monto_total:,.2f}",
+            )
+
+            indicadores_plan[2].metric(
+                "Tiendas",
+                f"{cantidad_tiendas:,.0f}",
+            )
+
+            indicadores_plan[3].metric(
+                "Meses con compras",
+                f"{cantidad_meses:,.0f}",
+            )
+
+            indicadores_plan[4].metric(
+                "Primera compra",
+                (
+                    primera_fecha.strftime(
+                        "%d/%m/%Y"
+                    )
+                    if pd.notna(primera_fecha)
+                    else "Sin fecha"
+                ),
+            )
+
+            # =============================================
+            # MATRIZ DE CANTIDADES
+            # =============================================
+
+            st.markdown(
+                "### Cantidades requeridas por tienda y mes"
+            )
+
+            matriz_cantidades = pd.pivot_table(
+                plan_supranumero,
+                index="Tienda",
+                columns="Mes compra",
+                values="Cantidad",
+                aggfunc="sum",
+                fill_value=0,
+            )
+
+            for mes in ORDEN_MESES:
+                if mes not in matriz_cantidades.columns:
+                    matriz_cantidades[mes] = 0
+
+            matriz_cantidades = matriz_cantidades[
+                ORDEN_MESES
+            ]
+
+            matriz_cantidades["Total"] = (
+                matriz_cantidades.sum(
+                    axis=1
+                )
+            )
+
+            matriz_cantidades = (
+                matriz_cantidades.sort_values(
+                    "Total",
+                    ascending=False,
+                )
+            )
+
+            def formato_cantidad_plan(valor):
+                if pd.isna(valor):
+                    return ""
+
+                if abs(float(valor)) < 0.005:
+                    return ""
+
+                if float(valor).is_integer():
+                    return f"{float(valor):,.0f}"
+
+                return f"{float(valor):,.2f}"
+
+            estilo_cantidades = (
+                matriz_cantidades.style
+                .background_gradient(
+                    cmap="Greens",
+                    subset=ORDEN_MESES,
+                )
+                .format(
+                    formato_cantidad_plan,
+                    subset=matriz_cantidades.columns,
+                )
+            )
+
+            st.dataframe(
+                estilo_cantidades,
+                width="stretch",
+                height=min(
+                    600,
+                    max(
+                        250,
+                        len(matriz_cantidades) * 42,
+                    ),
+                ),
+            )
+
+            st.caption(
+                "Las celdas vacías indican que no existe "
+                "una cantidad programada en ese mes."
+            )
+
+            # =============================================
+            # GRÁFICO DE CANTIDADES
+            # =============================================
+
+            st.markdown(
+                "### Distribución de cantidades por mes y tienda"
+            )
+
+            cantidades_grafico = (
+                plan_supranumero
+                .groupby(
+                    [
+                        "Mes número compra",
+                        "Mes compra",
+                        "Tienda",
+                    ],
+                    as_index=False,
+                )
+                .agg(
+                    Cantidad=(
+                        "Cantidad",
+                        "sum",
+                    )
+                )
+                .sort_values(
+                    "Mes número compra"
+                )
+            )
+
+            if cantidades_grafico.empty:
+                st.info(
+                    "No existen cantidades para graficar."
+                )
+
+            else:
+                grafico_cantidades = px.bar(
+                    cantidades_grafico,
+                    x="Mes compra",
+                    y="Cantidad",
+                    color="Tienda",
+                    barmode="group",
+                    text_auto=".2s",
+                    category_orders={
+                        "Mes compra": ORDEN_MESES,
+                    },
+                    title=(
+                        "Cantidad por mes y tienda: "
+                        f"{supranumero_seleccionado}"
+                    ),
+                    labels={
+                        "Mes compra": "",
+                        "Cantidad": "Cantidad requerida",
+                    },
+                )
+
+                grafico_cantidades.update_layout(
+                    height=500,
+                    legend_title_text="Tienda",
+                    margin=dict(
+                        l=10,
+                        r=10,
+                        t=60,
+                        b=20,
+                    ),
+                )
+
+                grafico_cantidades.update_traces(
+                    hovertemplate=(
+                        "<b>%{fullData.name}</b><br>"
+                        "Mes: %{x}<br>"
+                        "Cantidad: %{y:,.2f}"
+                        "<extra></extra>"
+                    )
+                )
+
+                st.plotly_chart(
+                    grafico_cantidades,
+                    width="stretch",
+                )
+
+            # =============================================
+            # RESUMEN OPERATIVO
+            # =============================================
+
+            st.markdown(
+                "### Resumen para gestionar la compra"
+            )
+
+            resumen_compra = (
+                plan_supranumero
+                .groupby(
+                    [
+                        "Tienda",
+                        "Centro",
+                        "Mes número compra",
+                        "Mes compra",
+                    ],
+                    as_index=False,
+                    dropna=False,
+                )
+                .agg(
+                    Cantidad=(
+                        "Cantidad",
+                        "sum",
+                    ),
+                    Monto_USD=(
+                        "Presupuesto USD",
+                        "sum",
+                    ),
+                    Fecha_compra=(
+                        "Fecha compra",
+                        "min",
+                    ),
+                    Cantidad_lineas=(
+                        "Detalle de compra",
+                        "size",
+                    ),
+                )
+                .sort_values(
+                    [
+                        "Mes número compra",
+                        "Fecha_compra",
+                        "Tienda",
+                    ]
+                )
+                .rename(
+                    columns={
+                        "Mes compra": "Mes",
+                        "Monto_USD": "Monto USD",
+                        "Fecha_compra": "Fecha de compra",
+                        "Cantidad_lineas": "Líneas de compra",
+                    }
+                )
+            )
+
+            resumen_visible = resumen_compra[
+                [
+                    "Tienda",
+                    "Centro",
+                    "Mes",
+                    "Fecha de compra",
+                    "Cantidad",
+                    "Monto USD",
+                    "Líneas de compra",
+                ]
+            ].copy()
+
+            estilo_resumen = (
+                resumen_visible.style
+                .format(
+                    {
+                        "Cantidad": formato_cantidad_plan,
+                        "Monto USD": lambda valor: (
+                            ""
+                            if pd.isna(valor)
+                            or abs(float(valor)) < 0.005
+                            else f"US$ {float(valor):,.2f}"
+                        ),
+                        "Fecha de compra": lambda valor: (
+                            valor.strftime("%d/%m/%Y")
+                            if pd.notna(valor)
+                            else ""
+                        ),
+                        "Líneas de compra": lambda valor: (
+                            f"{float(valor):,.0f}"
+                        ),
+                    }
+                )
+            )
+
+            st.dataframe(
+                estilo_resumen,
+                width="stretch",
+                height=420,
+            )
+
+            # =============================================
+            # DETALLE DE ACTIVOS
+            # =============================================
+
+            st.markdown(
+                "### Detalle de los activos incluidos"
+            )
+
+            detalle_plan_compras = plan_supranumero[
+                [
+                    "Tienda",
+                    "Centro",
+                    "Agrupador",
+                    "Supranúmero",
+                    "Detalle de compra",
+                    "Cantidad",
+                    "Moneda",
+                    "Precio unitario",
+                    "Presupuesto USD",
+                    "Fecha compra",
+                    "Fecha entrega",
+                    "Estatus compra",
+                    "Prioridad proyecto",
+                    "Semáforo",
+                ]
+            ].copy()
+
+            if tipo_orden_plan == "Fecha de compra":
+                detalle_plan_compras = (
+                    detalle_plan_compras.sort_values(
+                        [
+                            "Fecha compra",
+                            "Tienda",
+                        ]
+                    )
+                )
+
+            elif tipo_orden_plan == "Tienda":
+                detalle_plan_compras = (
+                    detalle_plan_compras.sort_values(
+                        [
+                            "Tienda",
+                            "Fecha compra",
+                        ]
+                    )
+                )
+
+            elif tipo_orden_plan == "Mayor cantidad":
+                detalle_plan_compras = (
+                    detalle_plan_compras.sort_values(
+                        "Cantidad",
+                        ascending=False,
+                    )
+                )
+
+            else:
+                detalle_plan_compras = (
+                    detalle_plan_compras.sort_values(
+                        "Presupuesto USD",
+                        ascending=False,
+                    )
+                )
+
+            mostrar_tabla(
+                detalle_plan_compras,
+                altura=520,
+            )
+
+            nombre_archivo = re.sub(
+                r"[^a-zA-Z0-9]+",
+                "_",
+                normalizar_texto(
+                    supranumero_seleccionado
+                ),
+            ).strip("_")
+
+            st.download_button(
+                label=(
+                    "Descargar plan de compras de "
+                    f"{supranumero_seleccionado}"
+                ),
+                data=crear_excel_descarga(
+                    detalle_plan_compras,
+                    "Plan de compras",
+                ),
+                file_name=(
+                    f"plan_compras_{nombre_archivo}.xlsx"
+                ),
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                key=(
+                    "descarga_plan_compras_"
+                    + nombre_archivo
+                ),
+            )
 # =========================================================
 # SEGUIMIENTO
 # =========================================================
@@ -1896,7 +2393,389 @@ with tab_entregas:
         tabla_riesgo
     )
 
+# =========================================================
+# CRONOGRAMA DE ACTIVOS
+# =========================================================
 
+with tab_cronograma:
+    st.subheader("Cronograma visual de compras y entregas")
+
+    st.caption(
+        "Cada barra representa el período entre la fecha de compra "
+        "y la fecha de entrega de un activo."
+    )
+
+    cronograma = df_filtrado[
+        df_filtrado["Fecha compra"].notna()
+        & df_filtrado["Fecha entrega"].notna()
+    ].copy()
+
+    cronograma = cronograma[
+        cronograma["Fecha entrega"]
+        >= cronograma["Fecha compra"]
+    ].copy()
+
+    if cronograma.empty:
+        st.info(
+            "No existen registros con fecha de compra y fecha "
+            "de entrega válidas para los filtros seleccionados."
+        )
+
+    else:
+        cronograma["Activo corto"] = (
+            cronograma["Detalle de compra"]
+            .astype(str)
+            .str.slice(0, 55)
+        )
+
+        cronograma["Activo y tienda"] = (
+            cronograma["Tienda"].astype(str)
+            + " | "
+            + cronograma["Activo corto"]
+        )
+
+        cronograma["Duración días"] = (
+            cronograma["Fecha entrega"]
+            - cronograma["Fecha compra"]
+        ).dt.days
+
+        st.markdown("### Configuración del cronograma")
+
+        columna_1, columna_2, columna_3 = st.columns(3)
+
+        orden_cronograma = columna_1.selectbox(
+            "Ordenar por",
+            [
+                "Fecha de compra",
+                "Fecha de entrega",
+                "Mayor monto",
+                "Mayor duración",
+            ],
+            key="orden_cronograma",
+        )
+
+        cantidad_visual = columna_2.slider(
+            "Cantidad máxima de activos",
+            min_value=10,
+            max_value=100,
+            value=40,
+            step=10,
+            key="cantidad_cronograma",
+        )
+
+        color_cronograma = columna_3.selectbox(
+            "Color de las barras",
+            [
+                "Semáforo",
+                "Tienda",
+                "Agrupador",
+                "Estatus compra",
+                "Prioridad proyecto",
+            ],
+            key="color_cronograma",
+        )
+
+        if orden_cronograma == "Fecha de compra":
+            cronograma = cronograma.sort_values(
+                "Fecha compra",
+                ascending=True,
+            )
+
+        elif orden_cronograma == "Fecha de entrega":
+            cronograma = cronograma.sort_values(
+                "Fecha entrega",
+                ascending=True,
+            )
+
+        elif orden_cronograma == "Mayor monto":
+            cronograma = cronograma.sort_values(
+                "Presupuesto USD",
+                ascending=False,
+            )
+
+        else:
+            cronograma = cronograma.sort_values(
+                "Duración días",
+                ascending=False,
+            )
+
+        cronograma_visual = cronograma.head(
+            cantidad_visual
+        ).copy()
+
+        colores_semaforo = {
+            "Crítico": "#C00000",
+            "Atención": "#ED7D31",
+            "Planificar": "#FFD966",
+            "En tiempo": "#70AD47",
+            "Completada": "#5B9BD5",
+            "Sin fecha": "#A5A5A5",
+        }
+
+        configuracion_color = {}
+
+        if color_cronograma == "Semáforo":
+            configuracion_color["color_discrete_map"] = (
+                colores_semaforo
+            )
+
+        grafico_cronograma = px.timeline(
+            cronograma_visual,
+            x_start="Fecha compra",
+            x_end="Fecha entrega",
+            y="Activo y tienda",
+            color=color_cronograma,
+            hover_data={
+                "Tienda": True,
+                "Centro": True,
+                "Agrupador": True,
+                "Supranúmero": True,
+                "Detalle de compra": True,
+                "Presupuesto USD": ":,.2f",
+                "Fecha compra": "|%d/%m/%Y",
+                "Fecha entrega": "|%d/%m/%Y",
+                "Fecha apertura": "|%d/%m/%Y",
+                "Duración días": True,
+                "Estatus compra": True,
+                "Prioridad proyecto": True,
+                "Semáforo": True,
+                "Activo y tienda": False,
+                "Activo corto": False,
+            },
+            title="Cronograma de compra y entrega por activo",
+            **configuracion_color,
+        )
+
+        grafico_cronograma.update_yaxes(
+            autorange="reversed",
+            title="",
+        )
+
+        grafico_cronograma.update_xaxes(
+            title="Fecha",
+            tickformat="%b-%Y",
+        )
+
+        altura_cronograma = max(
+            550,
+            len(cronograma_visual) * 29,
+        )
+
+        grafico_cronograma.update_layout(
+            height=altura_cronograma,
+            legend_title_text=color_cronograma,
+            margin=dict(
+                l=10,
+                r=10,
+                t=60,
+                b=20,
+            ),
+        )
+
+        st.plotly_chart(
+            grafico_cronograma,
+            width="stretch",
+        )
+
+        st.info(
+            "Una barra más larga representa un mayor período "
+            "entre la fecha de compra y la fecha de entrega."
+        )
+
+        indicadores_cronograma = st.columns(4)
+
+        indicadores_cronograma[0].metric(
+            "Activos en cronograma",
+            f"{len(cronograma):,.0f}",
+        )
+
+        indicadores_cronograma[1].metric(
+            "Duración promedio",
+            f"{cronograma['Duración días'].mean():,.0f} días",
+        )
+
+        indicadores_cronograma[2].metric(
+            "Duración máxima",
+            f"{cronograma['Duración días'].max():,.0f} días",
+        )
+
+        indicadores_cronograma[3].metric(
+            "Tiendas involucradas",
+            f"{cronograma['Tienda'].nunique():,.0f}",
+        )
+
+        st.markdown("### Detalle del cronograma")
+
+        tabla_cronograma = cronograma[
+            [
+                "Tienda",
+                "Centro",
+                "Agrupador",
+                "Supranúmero",
+                "Detalle de compra",
+                "Cantidad",
+                "Presupuesto USD",
+                "Fecha compra",
+                "Fecha entrega",
+                "Fecha apertura",
+                "Duración días",
+                "Estatus compra",
+                "Prioridad proyecto",
+                "Semáforo",
+            ]
+        ].sort_values(
+            [
+                "Fecha compra",
+                "Fecha entrega",
+            ]
+        )
+
+        mostrar_tabla(
+            tabla_cronograma,
+            altura=500,
+        )
+
+        st.download_button(
+            "Descargar cronograma filtrado",
+            data=crear_excel_descarga(
+                tabla_cronograma,
+                "Cronograma",
+            ),
+            file_name="cronograma_activos.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            key="descarga_cronograma",
+        )
+
+    st.divider()
+
+    st.subheader("Línea de hitos por tienda")
+
+    st.caption(
+        "Esta vista muestra las fechas principales de compra, "
+        "entrega, fin y apertura para cada tienda."
+    )
+
+    lista_hitos = []
+
+    columnas_hitos = {
+        "Fecha compra": "Compra",
+        "Fecha entrega": "Entrega",
+        "Fecha fin": "Fin",
+        "Fecha apertura": "Apertura",
+    }
+
+    for columna_fecha, nombre_hito in columnas_hitos.items():
+        temporal_hito = df_filtrado[
+            [
+                "Tienda",
+                "Detalle de compra",
+                "Presupuesto USD",
+                columna_fecha,
+            ]
+        ].copy()
+
+        temporal_hito = temporal_hito.rename(
+            columns={
+                columna_fecha: "Fecha",
+            }
+        )
+
+        temporal_hito["Hito"] = nombre_hito
+
+        temporal_hito = temporal_hito[
+            temporal_hito["Fecha"].notna()
+        ]
+
+        lista_hitos.append(
+            temporal_hito
+        )
+
+    if lista_hitos:
+        df_hitos = pd.concat(
+            lista_hitos,
+            ignore_index=True,
+        )
+
+    else:
+        df_hitos = pd.DataFrame()
+
+    if df_hitos.empty:
+        st.info(
+            "No existen fechas válidas para mostrar "
+            "la línea de hitos."
+        )
+
+    else:
+        hitos_consolidados = (
+            df_hitos
+            .groupby(
+                [
+                    "Tienda",
+                    "Fecha",
+                    "Hito",
+                ],
+                as_index=False,
+            )
+            .agg(
+                Monto_USD=(
+                    "Presupuesto USD",
+                    "sum",
+                ),
+                Cantidad_registros=(
+                    "Detalle de compra",
+                    "size",
+                ),
+            )
+        )
+
+        colores_hitos = {
+            "Compra": "#17365D",
+            "Entrega": "#ED7D31",
+            "Fin": "#7030A0",
+            "Apertura": "#70AD47",
+        }
+
+        grafico_hitos = px.scatter(
+            hitos_consolidados,
+            x="Fecha",
+            y="Tienda",
+            color="Hito",
+            size="Cantidad_registros",
+            color_discrete_map=colores_hitos,
+            hover_data={
+                "Fecha": "|%d/%m/%Y",
+                "Monto_USD": ":,.2f",
+                "Cantidad_registros": True,
+            },
+            title="Hitos principales por tienda",
+        )
+
+        grafico_hitos.update_xaxes(
+            title="Fecha",
+            tickformat="%b-%Y",
+        )
+
+        grafico_hitos.update_yaxes(
+            title="",
+        )
+
+        grafico_hitos.update_layout(
+            height=max(
+                450,
+                hitos_consolidados[
+                    "Tienda"
+                ].nunique() * 65,
+            ),
+            legend_title_text="Hito",
+        )
+
+        st.plotly_chart(
+            grafico_hitos,
+            width="stretch",
+        )
 # =========================================================
 # CALIDAD DE DATOS
 # =========================================================
