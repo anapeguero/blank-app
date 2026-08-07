@@ -89,6 +89,33 @@ def normalizar_texto(valor):
     return re.sub(r"\s+", " ", valor)
 
 
+def estatus_compra_excluido(estatus):
+    texto = normalizar_texto(estatus)
+    variantes_excluidas = [
+        "alm gr",
+        "almacen gr",
+        "almacen de gr",
+        "alm proveedor",
+        "almacen proveedor",
+        "almacen del proveedor",
+        "orden colocada",
+        "orden de compra colocada",
+        "orden emitida",
+        "en transito",
+        "transito",
+        "comprada",
+        "compra realizada",
+        "realizada",
+        "completada",
+        "cerrada",
+        "finalizada",
+        "recibida",
+        "entregada",
+    ]
+
+    return any(variacion in texto for variacion in variantes_excluidas)
+
+
 def localizar_columna(df, opciones):
     mapa = {
         normalizar_texto(columna): columna
@@ -537,16 +564,105 @@ def preparar_datos(df):
         "Estatus compra"
     ].map(normalizar_texto)
 
-    compra_completada = estatus_normalizado.str.contains(
-        "realizada|completada|comprada|cerrada|finalizada",
-        regex=True,
-        na=False,
+    # Estados que indican que la compra ya fue gestionada.
+    patron_no_pendiente = (
+        r"alm\.?\s*gr"
+        r"|almacen\s*gr"
+        r"|almacen\s*de\s*gr"
+        r"|alm\.?\s*proveedor"
+        r"|almacen\s*proveedor"
+        r"|almacen\s*del\s*proveedor"
+        r"|orden\s*colocada"
+        r"|orden\s*de\s*compra\s*colocada"
+        r"|orden\s*emitida"
+        r"|en\s*transito"
+        r"|transito"
+        r"|comprada"
+        r"|compra\s*realizada"
+        r"|realizada"
+        r"|completada"
+        r"|cerrada"
+        r"|finalizada"
+        r"|recibida"
+        r"|entregada"
     )
 
+    resultado["Compra pendiente"] = (
+        ~estatus_normalizado.str.contains(
+            patron_no_pendiente,
+            regex=True,
+            na=False,
+        )
+    )
+
+    resultado["Motivo exclusión"] = ""
+
     resultado.loc[
-        compra_completada,
+        estatus_normalizado.str.contains(
+            r"alm\.?\s*gr|almacen\s*gr|almacen\s*de\s*gr",
+            regex=True,
+            na=False,
+        ),
+        "Motivo exclusión",
+    ] = "Activo en almacén GR"
+
+    resultado.loc[
+        estatus_normalizado.str.contains(
+            (
+                r"alm\.?\s*proveedor"
+                r"|almacen\s*proveedor"
+                r"|almacen\s*del\s*proveedor"
+            ),
+            regex=True,
+            na=False,
+        ),
+        "Motivo exclusión",
+    ] = "Activo en almacén del proveedor"
+
+    resultado.loc[
+        estatus_normalizado.str.contains(
+            (
+                r"orden\s*colocada"
+                r"|orden\s*de\s*compra\s*colocada"
+                r"|orden\s*emitida"
+            ),
+            regex=True,
+            na=False,
+        ),
+        "Motivo exclusión",
+    ] = "Orden de compra colocada"
+
+    resultado.loc[
+        estatus_normalizado.str.contains(
+            r"en\s*transito|transito",
+            regex=True,
+            na=False,
+        ),
+        "Motivo exclusión",
+    ] = "En tránsito"
+
+    resultado.loc[
+        estatus_normalizado.str.contains(
+            (
+                r"comprada"
+                r"|compra\s*realizada"
+                r"|realizada"
+                r"|completada"
+                r"|cerrada"
+                r"|finalizada"
+                r"|recibida"
+                r"|entregada"
+            ),
+            regex=True,
+            na=False,
+        ),
+        "Motivo exclusión",
+    ] = "Compra gestionada"
+
+    resultado.loc[
+        ~resultado["Compra pendiente"],
         "Semáforo",
-    ] = "Completada"
+    ] = "Gestionada"
 
     resultado["Diferencia flujo DOP"] = (
         resultado["Total flujo utilizado"]
@@ -750,6 +866,22 @@ def crear_excel_descarga(df, nombre_hoja):
 
     return salida.getvalue()
 
+def formato_cantidad_plan(valor):
+    if pd.isna(valor):
+        return ""
+
+    try:
+        numero = float(valor)
+    except (TypeError, ValueError):
+        return valor
+
+    if abs(numero) < 0.005:
+        return ""
+
+    if numero.is_integer():
+        return f"{numero:,.0f}"
+
+    return f"{numero:,.2f}"
 
 def mostrar_tabla(df, altura=480):
     configuracion = {}
@@ -926,7 +1058,28 @@ if filtro_anio:
             filtro_anio
         )
     ]
+# Base exclusiva de compras que todavía requieren gestión.
+# Excluye almacén GR, almacén del proveedor, orden colocada
+# y demás compras ya gestionadas.
 
+df_pendiente = df_filtrado[
+    df_filtrado["Compra pendiente"]
+].copy()
+
+df_pendiente_planificado = df_pendiente[
+    df_pendiente["Fecha válida"]
+].copy()
+
+if filtro_anio:
+    df_pendiente_planificado = (
+        df_pendiente_planificado[
+            df_pendiente_planificado[
+                "Año compra"
+            ].isin(
+                filtro_anio
+            )
+        ]
+    )
 
 # =========================================================
 # PESTAÑAS
@@ -1002,7 +1155,7 @@ with tab_resumen:
             "con monto que no tienen una fecha de compra válida."
         )
 
-    if df_planificado.empty:
+    if df_pendiente_planificado.empty:
         st.info(
             "No existen compras con fechas válidas "
             "para los filtros seleccionados."
@@ -1276,15 +1429,15 @@ with tab_plan_compras:
         "cuánto comprar, en qué mes y para cuáles tiendas."
     )
 
-    if df_planificado.empty:
+    if df_pendiente_planificado.empty:
         st.info(
-            "No existen compras con fechas válidas "
+            "No existen compras pendientes con fechas válidas "
             "para los filtros seleccionados."
         )
 
     else:
         opciones_supranumero = sorted(
-            df_planificado[
+            df_pendiente_planificado[
                 "Supranúmero"
             ]
             .dropna()
@@ -1299,15 +1452,15 @@ with tab_plan_compras:
             )
 
         else:
-            columna_selector, columna_orden = st.columns(
-                [2, 1]
-            )
+            columna_selector, columna_orden = st.columns([2, 1])
 
-            supranumero_seleccionado = (
-                columna_selector.selectbox(
-                    "Selecciona el supranúmero que deseas gestionar",
+            supranumeros_seleccionados = (
+                columna_selector.multiselect(
+                    "Selecciona uno o varios supranúmeros",
                     options=opciones_supranumero,
-                    key="supranumero_plan_compras",
+                    default=opciones_supranumero[:1],
+                    placeholder="Selecciona los supranúmeros",
+                    key="supranumeros_plan_compras",
                 )
             )
 
@@ -1319,16 +1472,33 @@ with tab_plan_compras:
                     "Mayor cantidad",
                     "Mayor monto",
                 ],
-                key="orden_plan_compras",
+                key="orden_detalle_plan_compras",
             )
 
-            plan_supranumero = df_planificado[
-                df_planificado[
-                    "Supranúmero"
-                ].eq(
-                    supranumero_seleccionado
+            if not supranumeros_seleccionados:
+                st.warning(
+                    "Selecciona al menos un supranúmero "
+                    "para generar el plan de compras."
                 )
-            ].copy()
+
+                plan_supranumero = (
+                    df_pendiente_planificado.iloc[0:0].copy()
+                )
+
+            else:
+                plan_supranumero = (
+                    df_pendiente_planificado[
+                        df_pendiente_planificado[
+                            "Supranúmero"
+                        ].isin(
+                            supranumeros_seleccionados
+                        )
+                    ].copy()
+                )
+
+            nombre_seleccion = ", ".join(
+                [str(valor) for valor in supranumeros_seleccionados]
+            )
 
             cantidad_total = plan_supranumero[
                 "Cantidad"
@@ -1388,83 +1558,91 @@ with tab_plan_compras:
             )
 
             # =============================================
-            # MATRIZ DE CANTIDADES
+            # MATRIZ POR SUPRANÚMERO, TIENDA Y MES
             # =============================================
 
             st.markdown(
-                "### Cantidades requeridas por tienda y mes"
+                "### Cantidades requeridas por supranúmero, tienda y mes"
             )
 
-            matriz_cantidades = pd.pivot_table(
-                plan_supranumero,
-                index="Tienda",
-                columns="Mes compra",
-                values="Cantidad",
-                aggfunc="sum",
-                fill_value=0,
-            )
-
-            for mes in ORDEN_MESES:
-                if mes not in matriz_cantidades.columns:
-                    matriz_cantidades[mes] = 0
-
-            matriz_cantidades = matriz_cantidades[
-                ORDEN_MESES
-            ]
-
-            matriz_cantidades["Total"] = (
-                matriz_cantidades.sum(
-                    axis=1
+            if plan_supranumero.empty:
+                st.info(
+                    "Selecciona al menos un supranúmero "
+                    "para visualizar la matriz."
                 )
-            )
 
-            matriz_cantidades = (
-                matriz_cantidades.sort_values(
-                    "Total",
-                    ascending=False,
+            else:
+                matriz_cantidades = pd.pivot_table(
+                    plan_supranumero,
+                    index=[
+                        "Supranúmero",
+                        "Tienda",
+                    ],
+                    columns="Mes compra",
+                    values="Cantidad",
+                    aggfunc="sum",
+                    fill_value=0,
                 )
-            )
 
-            def formato_cantidad_plan(valor):
-                if pd.isna(valor):
-                    return ""
+                for mes in ORDEN_MESES:
+                    if mes not in matriz_cantidades.columns:
+                        matriz_cantidades[mes] = 0
 
-                if abs(float(valor)) < 0.005:
-                    return ""
+                matriz_cantidades = matriz_cantidades[ORDEN_MESES]
 
-                if float(valor).is_integer():
-                    return f"{float(valor):,.0f}"
+                matriz_cantidades["Total"] = matriz_cantidades.sum(axis=1)
 
-                return f"{float(valor):,.2f}"
-
-            estilo_cantidades = (
-                matriz_cantidades.style
-                .background_gradient(
-                    cmap="Greens",
-                    subset=ORDEN_MESES,
+                matriz_cantidades = matriz_cantidades.sort_values(
+                    [
+                        "Supranúmero",
+                        "Total",
+                    ],
+                    ascending=[
+                        True,
+                        False,
+                    ],
                 )
-                .format(
-                    formato_cantidad_plan,
-                    subset=matriz_cantidades.columns,
-                )
-            )
 
-            st.dataframe(
-                estilo_cantidades,
-                width="stretch",
-                height=min(
-                    600,
-                    max(
-                        250,
-                        len(matriz_cantidades) * 42,
+                def formato_cantidad_matriz(valor):
+                    if pd.isna(valor):
+                        return ""
+
+                    if abs(float(valor)) < 0.005:
+                        return ""
+
+                    if float(valor).is_integer():
+                        return f"{float(valor):,.0f}"
+
+                    return f"{float(valor):,.2f}"
+
+                estilo_matriz_cantidades = (
+                    matriz_cantidades.style
+                    .background_gradient(
+                        cmap="Greens",
+                        subset=ORDEN_MESES,
+                    )
+                    .format(
+                        formato_cantidad_matriz,
+                        subset=matriz_cantidades.columns,
+                    )
+                )
+
+                st.dataframe(
+                    estilo_matriz_cantidades,
+                    width="stretch",
+                    height=min(
+                        650,
+                        max(
+                            300,
+                            len(matriz_cantidades) * 38,
+                        ),
                     ),
-                ),
-            )
+                )
 
-            st.caption(
-                "Las celdas vacías indican que no existe "
-                "una cantidad programada en ese mes."
-            )
+                st.caption(
+                    "Las celdas vacías indican que no hay "
+                    "cantidades programadas para ese mes."
+                )
 
             # =============================================
             # GRÁFICO DE CANTIDADES
@@ -1481,6 +1659,7 @@ with tab_plan_compras:
                         "Mes número compra",
                         "Mes compra",
                         "Tienda",
+                        "Supranúmero",
                     ],
                     as_index=False,
                 )
@@ -1505,15 +1684,15 @@ with tab_plan_compras:
                     cantidades_grafico,
                     x="Mes compra",
                     y="Cantidad",
-                    color="Tienda",
+                    color="Supranúmero",
                     barmode="group",
                     text_auto=".2s",
                     category_orders={
                         "Mes compra": ORDEN_MESES,
                     },
                     title=(
-                        "Cantidad por mes y tienda: "
-                        f"{supranumero_seleccionado}"
+                        "Cantidades por mes, tienda y supranúmero:"
+                        f"{nombre_seleccion}"
                     ),
                     labels={
                         "Mes compra": "",
@@ -1523,7 +1702,7 @@ with tab_plan_compras:
 
                 grafico_cantidades.update_layout(
                     height=500,
-                    legend_title_text="Tienda",
+                    legend_title_text="Supranúmero",
                     margin=dict(
                         l=10,
                         r=10,
@@ -1670,39 +1849,31 @@ with tab_plan_compras:
             ].copy()
 
             if tipo_orden_plan == "Fecha de compra":
-                detalle_plan_compras = (
-                    detalle_plan_compras.sort_values(
-                        [
-                            "Fecha compra",
-                            "Tienda",
-                        ]
-                    )
+                detalle_plan_compras = detalle_plan_compras.sort_values(
+                    [
+                        "Fecha compra",
+                        "Tienda",
+                    ]
                 )
 
             elif tipo_orden_plan == "Tienda":
-                detalle_plan_compras = (
-                    detalle_plan_compras.sort_values(
-                        [
-                            "Tienda",
-                            "Fecha compra",
-                        ]
-                    )
+                detalle_plan_compras = detalle_plan_compras.sort_values(
+                    [
+                        "Tienda",
+                        "Fecha compra",
+                    ]
                 )
 
             elif tipo_orden_plan == "Mayor cantidad":
-                detalle_plan_compras = (
-                    detalle_plan_compras.sort_values(
-                        "Cantidad",
-                        ascending=False,
-                    )
+                detalle_plan_compras = detalle_plan_compras.sort_values(
+                    "Cantidad",
+                    ascending=False,
                 )
 
             else:
-                detalle_plan_compras = (
-                    detalle_plan_compras.sort_values(
-                        "Presupuesto USD",
-                        ascending=False,
-                    )
+                detalle_plan_compras = detalle_plan_compras.sort_values(
+                    "Presupuesto USD",
+                    ascending=False,
                 )
 
             mostrar_tabla(
@@ -1714,22 +1885,16 @@ with tab_plan_compras:
                 r"[^a-zA-Z0-9]+",
                 "_",
                 normalizar_texto(
-                    supranumero_seleccionado
-                ),
-            ).strip("_")
-
-            nombre_archivo = re.sub(
-                r"[^a-zA-Z0-9]+",
-                "_",
-                normalizar_texto(
-                    supranumero_seleccionado
+                    "_".join(
+                        [str(valor) for valor in supranumeros_seleccionados]
+                    )
                 ),
             ).strip("_")
 
             st.download_button(
                 label=(
                     "Descargar plan de compras de "
-                    f"{supranumero_seleccionado}"
+                    f"{nombre_seleccion}"
                 ),
                 data=crear_excel_descarga(
                     detalle_plan_compras,
@@ -1747,43 +1912,119 @@ with tab_plan_compras:
                     + nombre_archivo
                 ),
             )
+
 # =========================================================
 # SEGUIMIENTO
 # =========================================================
 
 with tab_seguimiento:
-    st.subheader(
-        "Seguimiento y riesgo de compras"
+    st.subheader("Seguimiento de compras realmente pendientes")
+
+    st.caption(
+        "Esta sección excluye las compras con orden colocada, "
+        "los activos en almacén GR, los activos en almacén del proveedor "
+        "y las compras que ya fueron gestionadas."
     )
 
-    vencidas = df_filtrado[
-        (
-            df_filtrado["Días para compra"] < 0
+    seguimiento_pendiente = df_pendiente_planificado.copy()
+    seguimiento_pendiente = seguimiento_pendiente[
+        ~seguimiento_pendiente["Estatus compra"].apply(estatus_compra_excluido)
+    ].copy()
+
+    fecha_actual = pd.Timestamp.now().normalize()
+
+    seguimiento_pendiente["Días para compra"] = (
+        seguimiento_pendiente["Fecha compra"] - fecha_actual
+    ).dt.days
+
+    st.markdown("### Filtros internos")
+
+    filtro_tienda = st.multiselect(
+        "Tienda",
+        options=sorted(
+            seguimiento_pendiente["Tienda"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        ),
+        default=[],
+        placeholder="Todas",
+        key="seguimiento_tienda",
+    )
+
+    filtro_supranumero = st.multiselect(
+        "Supranúmero",
+        options=sorted(
+            seguimiento_pendiente["Supranúmero"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        ),
+        default=[],
+        placeholder="Todos",
+        key="seguimiento_supranumero",
+    )
+
+    filtro_prioridad = st.multiselect(
+        "Prioridad",
+        options=sorted(
+            seguimiento_pendiente["Prioridad proyecto"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        ),
+        default=[],
+        placeholder="Todas",
+        key="seguimiento_prioridad",
+    )
+
+    seguimiento_filtrado = seguimiento_pendiente.copy()
+
+    if filtro_tienda:
+        seguimiento_filtrado = seguimiento_filtrado[
+            seguimiento_filtrado["Tienda"].isin(filtro_tienda)
+        ]
+
+    if filtro_supranumero:
+        seguimiento_filtrado = seguimiento_filtrado[
+            seguimiento_filtrado["Supranúmero"].isin(filtro_supranumero)
+        ]
+
+    if filtro_prioridad:
+        seguimiento_filtrado = seguimiento_filtrado[
+            seguimiento_filtrado["Prioridad proyecto"].isin(filtro_prioridad)
+        ]
+
+    fecha_fin_semana = fecha_actual + pd.Timedelta(days=7)
+
+    vencidas = seguimiento_filtrado[
+        seguimiento_filtrado["Días para compra"] < 0
+    ].copy()
+
+    proximos_30 = seguimiento_filtrado[
+        seguimiento_filtrado["Días para compra"].between(0, 30)
+    ].copy()
+
+    proximos_60 = seguimiento_filtrado[
+        seguimiento_filtrado["Días para compra"].between(31, 60)
+    ].copy()
+
+    proximos_90 = seguimiento_filtrado[
+        seguimiento_filtrado["Días para compra"].between(61, 90)
+    ].copy()
+
+    compras_semana = seguimiento_filtrado[
+        seguimiento_filtrado["Fecha compra"].between(
+            fecha_actual,
+            fecha_fin_semana,
+            inclusive="both",
         )
-        & ~df_filtrado["Semáforo"].eq(
-            "Completada"
-        )
-    ]
+    ].copy()
 
-    proximos_30 = df_filtrado[
-        df_filtrado[
-            "Días para compra"
-        ].between(0, 30)
-    ]
-
-    proximos_60 = df_filtrado[
-        df_filtrado[
-            "Días para compra"
-        ].between(31, 60)
-    ]
-
-    proximos_90 = df_filtrado[
-        df_filtrado[
-            "Días para compra"
-        ].between(61, 90)
-    ]
-
-    indicadores = st.columns(4)
+    indicadores = st.columns(5)
 
     indicadores[0].metric(
         "Compras vencidas",
@@ -1793,26 +2034,118 @@ with tab_seguimiento:
     )
 
     indicadores[1].metric(
+        "Deben salir esta semana",
+        f"{len(compras_semana):,.0f}",
+        f"US$ {compras_semana['Presupuesto USD'].sum():,.2f}",
+    )
+
+    indicadores[2].metric(
         "Próximos 30 días",
         f"{len(proximos_30):,.0f}",
         f"US${proximos_30['Presupuesto USD'].sum():,.0f}",
     )
 
-    indicadores[2].metric(
+    indicadores[3].metric(
         "Entre 31 y 60 días",
         f"{len(proximos_60):,.0f}",
         f"US${proximos_60['Presupuesto USD'].sum():,.0f}",
     )
 
-    indicadores[3].metric(
+    indicadores[4].metric(
         "Entre 61 y 90 días",
         f"{len(proximos_90):,.0f}",
-        f"US${proximos_90['Presupuesto USD'].sum():,.0f}",
+        f"US$ {proximos_90['Presupuesto USD'].sum():,.2f}",
     )
 
+    st.markdown("### Compras vencidas")
+
+    st.caption(
+        f"Período evaluado: {fecha_actual.strftime('%d/%m/%Y')} "
+        f"al {fecha_fin_semana.strftime('%d/%m/%Y')}."
+    )
+
+    if vencidas.empty:
+        st.success("No existen compras vencidas para los filtros seleccionados.")
+
+    else:
+        tabla_vencidas = vencidas[
+            [
+                "Fecha compra",
+                "Tienda",
+                "Centro",
+                "Agrupador",
+                "Supranúmero",
+                "Detalle de compra",
+                "Cantidad",
+                "Presupuesto USD",
+                "Estatus compra",
+                "Prioridad proyecto",
+                "Semáforo",
+            ]
+        ].sort_values(
+            [
+                "Fecha compra",
+                "Tienda",
+                "Supranúmero",
+            ]
+        )
+
+        mostrar_tabla(
+            tabla_vencidas,
+            altura=420,
+        )
+
+    st.markdown("### Compras que deben salir durante los próximos 7 días")
+
+    if compras_semana.empty:
+        st.success(
+            "No existen compras pendientes programadas "
+            "para los próximos 7 días."
+        )
+
+    else:
+        tabla_semana = compras_semana[
+            [
+                "Fecha compra",
+                "Tienda",
+                "Centro",
+                "Agrupador",
+                "Supranúmero",
+                "Detalle de compra",
+                "Cantidad",
+                "Presupuesto USD",
+                "Estatus compra",
+                "Prioridad proyecto",
+            ]
+        ].sort_values(
+            [
+                "Fecha compra",
+                "Tienda",
+                "Supranúmero",
+            ]
+        )
+
+        mostrar_tabla(
+            tabla_semana,
+            altura=420,
+        )
+
+        st.download_button(
+            "Descargar compras de los próximos 7 días",
+            data=crear_excel_descarga(
+                tabla_semana,
+                "Compras de la semana",
+            ),
+            file_name="compras_proximos_7_dias.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            key="descarga_compras_semana",
+        )
+
     resumen_semaforo = (
-        df_filtrado
-        .groupby(
+        seguimiento_filtrado.groupby(
             "Semáforo",
             as_index=False,
         )
@@ -1856,8 +2189,7 @@ with tab_seguimiento:
     izquierda, derecha = st.columns(2)
 
     estado_compra = (
-        df_filtrado
-        .groupby(
+        seguimiento_filtrado.groupby(
             "Estatus compra",
             as_index=False,
         )
@@ -1893,8 +2225,7 @@ with tab_seguimiento:
     )
 
     prioridad = (
-        df_filtrado
-        .groupby(
+        seguimiento_filtrado.groupby(
             "Prioridad proyecto",
             as_index=False,
         )
@@ -1923,10 +2254,8 @@ with tab_seguimiento:
         width="stretch",
     )
 
-    tabla_critica = df_filtrado[
-        df_filtrado[
-            "Semáforo"
-        ].isin(
+    tabla_critica = seguimiento_filtrado[
+        seguimiento_filtrado["Semáforo"].isin(
             [
                 "Crítico",
                 "Atención",
